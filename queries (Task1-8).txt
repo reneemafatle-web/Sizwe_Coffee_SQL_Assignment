@@ -1,0 +1,175 @@
+-- Sizwe Coffee SQL Assignment
+-- Renee Mafatle
+
+
+-- Task 1: Channel performance
+-- Nomsa needs the revenue split by channel for FY2024 and FY2025 side by side, with the growth rate
+-- between them. One row per channel, three figures on each.
+-- FY2024 is orders placed on or before 30 June 2024. FY2025 is everything after that.
+
+with channel_sales as (
+    select   o.channel,
+             sum(case when o.order_date <  '2024-07-01' then l.line_revenue else 0 end) as fy2024,
+             sum(case when o.order_date >= '2024-07-01' then l.line_revenue else 0 end) as fy2025
+    from     sizwe_sales_orders as o
+    join     sizwe_sales_lines  as l on o.order_id = l.order_id
+    where    o.channel is not null
+    group by o.channel
+)
+select channel,
+       fy2024                                                 as fy2024_revenue,
+       fy2025                                                 as fy2025_revenue,
+       round(100.0 * try_divide(fy2025 - fy2024, fy2024), 1)  as growth_pct
+from   channel_sales;
+
+
+-- Task 2: Where the profit actually comes from
+-- For each product line, return revenue, cost of goods, gross profit and gross margin percentage.
+-- Sort by gross profit. Which line earns the most profit, and is it the same line that earns the highest margin?
+
+select   p.product_line,
+         sum(l.line_revenue)                                                          as revenue,
+         sum(l.cogs)                                                                  as cost_of_goods,
+         sum(l.line_revenue) - sum(l.cogs)                                            as gross_profit,
+         round(100.0 * (sum(l.line_revenue) - sum(l.cogs)) / sum(l.line_revenue), 1)  as gross_margin_pct
+from     sizwe_sales_lines as l
+join     sizwe_products    as p on l.sku = p.sku
+group by p.product_line
+order by gross_profit desc;
+-- Answer: House Blend is the line that earns the most profit (R107.1m), however it is not the same line that
+-- earns the highest margin. Single Origin is the line with the highest margin at 44.3%, whereas House Blend is 38.3%.
+
+
+-- Task 3: The collections problem
+-- Nomsa suspects the business is being paid more slowly than it used to be, and wants to know where the
+-- problem sits. For each channel, return the number of invoices, how many have been settled, how many are
+-- still open, the average number of days taken to settle, and the total value still outstanding.
+-- What does this tell you, and which channel would you investigate first?
+
+select   c.channel,
+         count(*)                                                    as invoices,
+         count(a.settlement_date)                                    as settled,
+         count(*) - count(a.settlement_date)                         as still_open,
+         round(avg(datediff(a.settlement_date, a.invoice_date)), 1)  as avg_days_to_settle,
+         sum(a.invoice_amount) - sum(a.amount_settled)               as outstanding_value
+from     sizwe_ar_ledger as a
+join     sizwe_customers as c on a.customer_id = c.customer_id
+group by c.channel;
+-- Answer: Wholesale is where the problem sits. Wholesale customers take 68.7 days on average to pay, compared
+-- with only 3.8 days for Subscription, and Wholesale has 3,454 open invoices worth R87.8m, which is almost all
+-- of the money still owed (Subscription has only 44 open invoices worth R0.75m). I would investigate Wholesale first.
+
+
+-- Task 4: The ten accounts that matter most
+-- Bongani wants a one-page list of the ten largest customers by FY2025 revenue, showing the trading name,
+-- segment, province, the sales representative who owns the account, and the revenue.
+-- Not every customer has a sales representative. Make sure your query does not silently drop anyone.
+
+select    c.trading_name,
+          c.segment,
+          c.province,
+          coalesce(r.rep_name, 'unassigned')  as sales_rep,
+          sum(l.line_revenue)                 as fy2025_revenue
+from      sizwe_sales_orders as o
+join      sizwe_sales_lines  as l on o.order_id = l.order_id
+join      sizwe_customers    as c on o.customer_id = c.customer_id
+left join sizwe_reps         as r on c.rep_id = r.rep_id
+where     o.order_date >= '2024-07-01'
+group by  c.trading_name, c.segment, c.province, r.rep_name
+order by  fy2025_revenue desc
+limit 10;
+
+
+-- Task 5: A commercial gap
+-- Trade promotions are how Sizwe supports its wholesale accounts. Bongani thinks some sizeable customers
+-- have been getting nothing. Return the fifteen highest-revenue Wholesale customers who have never received
+-- a trade promotion, with their segment and province. What would you recommend doing about the top three?
+
+select    c.trading_name,
+          c.segment,
+          c.province,
+          sum(l.line_revenue)  as revenue
+from      sizwe_customers        as c
+join      sizwe_sales_orders     as o  on c.customer_id = o.customer_id
+join      sizwe_sales_lines      as l  on o.order_id = l.order_id
+left join sizwe_trade_promotions as tp on c.customer_id = tp.customer_id
+where     c.channel = 'Wholesale'
+  and     tp.customer_id is null
+group by  c.trading_name, c.segment, c.province
+order by  revenue desc
+limit 15;
+-- Answer: I would recommend offering the top three (Umhlanga Fresh 108, Ridgeway Foods 308 and Kalahari Kitchen 42)
+-- a once-off 10% discount on their next order, because they each bring in R4.4m to R6.2m but have never received
+-- any promotional support.
+
+
+-- Task 6: Are the sales representatives hitting target?
+-- Each sales representative carries a monthly revenue target. Return every sales representative with their
+-- territory, their monthly target, their actual FY2025 monthly average, and that average as a percentage of
+-- target. Sort by percentage of target, best first.
+-- Every sales representative must appear, including any who generated no revenue.
+
+select    r.rep_name,
+          r.territory,
+          r.target_monthly,
+          round(coalesce(sum(l.line_revenue), 0) / 12, 2)                           as avg_monthly_revenue,
+          round(100.0 * coalesce(sum(l.line_revenue), 0) / 12 / r.target_monthly, 1)  as pct_of_target
+from      sizwe_reps         as r
+left join sizwe_sales_orders as o on r.rep_id = o.rep_id and o.order_date >= '2024-07-01'
+left join sizwe_sales_lines  as l on o.order_id = l.order_id
+group by  r.rep_name, r.territory, r.target_monthly
+order by  pct_of_target desc;
+
+
+-- Task 7: The shape of the year
+-- Return monthly revenue across the full two years, with the percentage change on the previous month
+-- and a rolling three-month average alongside it.
+-- Is there a seasonal pattern, and when is Sizwe's quietest month?
+
+with monthly_revenue as (
+    select   date_trunc('month', o.order_date)  as month,
+             sum(l.line_revenue)                as revenue
+    from     sizwe_sales_orders as o
+    join     sizwe_sales_lines  as l on o.order_id = l.order_id
+    where    o.order_date is not null
+    group by 1
+)
+select   month,
+         revenue,
+         round(100.0 * (revenue - lag(revenue) over (order by month))
+               / lag(revenue) over (order by month), 1)                    as pct_change,
+         round((revenue + lag(revenue) over (order by month)
+                        + lag(revenue, 2) over (order by month)) / 3, 2)   as rolling_3m_avg
+from     monthly_revenue
+order by month;
+-- Answer: Yes, the pattern is the same in both years: revenue is highest in June and July, falls every month
+-- to a low in December, then climbs back from January to June. December is Sizwe's quietest month, down 13.1%
+-- in 2023 and 12.9% in 2024.
+
+
+-- Task 8: Why has the margin moved?
+-- Gross margin fell from 34.7% in FY2024 to 33.0% in FY2025, while revenue grew nearly 9%. Nobody can explain it.
+-- For each product line, return revenue and gross margin for each financial year, plus that line's share of
+-- total revenue in that year. What caused the margin decline?
+
+with line_sales as (
+    select   p.product_line,
+             case when o.order_date < '2024-07-01' then 'fy2024' else 'fy2025' end  as fin_year,
+             sum(l.line_revenue)  as revenue,
+             sum(l.cogs)          as cogs
+    from     sizwe_sales_orders as o
+    join     sizwe_sales_lines  as l on o.order_id = l.order_id
+    join     sizwe_products     as p on l.sku = p.sku
+    where    o.order_date is not null
+    group by 1, 2
+)
+select   product_line,
+         fin_year,
+         revenue,
+         round(100.0 * (revenue - cogs) / revenue, 1)                          as gross_margin_pct,
+         round(100.0 * revenue / sum(revenue) over (partition by fin_year), 1)  as revenue_share_pct
+from     line_sales
+order by product_line, fin_year;
+-- Answer: The margin fell because we sold more Bulk Commercial, which has the lowest margin (19.9%).
+-- Its share of revenue went up from 25.0% to 33.6%, while the margins of all the product lines stayed the same.
+
